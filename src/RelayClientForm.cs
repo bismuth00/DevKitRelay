@@ -1,7 +1,6 @@
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using SIPSorceryMedia.Encoders;
-using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Net.WebSockets;
@@ -16,6 +15,7 @@ internal sealed class RelayClientForm : Form
     private readonly Label _statusLabel;
     private readonly CancellationTokenSource _closingCts = new();
     private int _framesReceived;
+    private Size _videoSize = Size.Empty;
 
     public RelayClientForm(Uri serverUri, int durationSeconds)
     {
@@ -196,6 +196,7 @@ internal sealed class RelayClientForm : Form
         }
 
         _framesReceived++;
+        ResizeToVideo((int)width, (int)height);
         if (_framesReceived == 1 || _framesReceived % 30 == 0)
         {
             Console.WriteLine($"Received video frame #{_framesReceived}: {width}x{height}, {sample.Length} bytes");
@@ -223,6 +224,19 @@ internal sealed class RelayClientForm : Form
         var previous = _pictureBox.Image;
         _pictureBox.Image = next;
         previous?.Dispose();
+    }
+
+    private void ResizeToVideo(int width, int height)
+    {
+        var nextVideoSize = new Size(width, height);
+        if (_videoSize == nextVideoSize)
+        {
+            return;
+        }
+
+        _videoSize = nextVideoSize;
+        ClientSize = new Size(width, height + _statusLabel.Height);
+        Console.WriteLine($"Client window resized for video: {width}x{height}");
     }
 
     private void SetStatus(string status)
