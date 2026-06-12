@@ -1,5 +1,9 @@
 using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
+using SIPSorceryMedia.Encoders;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
 using System.Net.WebSockets;
 
 namespace DevKitRelay;
@@ -71,10 +75,17 @@ internal sealed class RelayClientForm : Form
             SetStatus($"Signaling connected: {_serverUri}");
 
             using var peerConnection = new RTCPeerConnection();
+            using var videoEndPoint = new VideoEncoderEndPoint();
             var localIceQueue = new List<RTCIceCandidate>();
             var remoteIceQueue = new List<RTCIceCandidateInit>();
             var answerSent = false;
             var remoteDescriptionSet = false;
+
+            var videoTrack = new MediaStreamTrack(videoEndPoint.GetVideoSinkFormats(), MediaStreamStatusEnum.RecvOnly);
+            peerConnection.addTrack(videoTrack);
+            peerConnection.OnVideoFrameReceived += videoEndPoint.GotVideoFrame;
+            peerConnection.OnVideoFormatsNegotiated += formats => videoEndPoint.SetVideoSinkFormat(formats.First());
+            videoEndPoint.OnVideoSinkDecodedSample += ShowDecodedFrame;
 
             peerConnection.onicecandidate += async candidate =>
             {
@@ -93,11 +104,17 @@ internal sealed class RelayClientForm : Form
                 }
             };
 
-            peerConnection.ondatachannel += dataChannel =>
+            peerConnection.onconnectionstatechange += async state =>
             {
-                SetStatus("DataChannel created.");
-                dataChannel.onopen += () => SetStatus("Receiving frames.");
-                dataChannel.onmessage += (_, _, data) => ShowFrame(data);
+                SetStatus($"Peer connection state: {state}");
+                if (state == RTCPeerConnectionState.connected)
+                {
+                    SetStatus("Receiving video stream.");
+                }
+                else if (state is RTCPeerConnectionState.closed or RTCPeerConnectionState.failed)
+                {
+                    await videoEndPoint.CloseVideo();
+                }
             };
 
             while (!_closingCts.IsCancellationRequested && webSocket.State == WebSocketState.Open)
@@ -165,27 +182,42 @@ internal sealed class RelayClientForm : Form
         }
     }
 
-    private void ShowFrame(byte[] jpeg)
+    private void ShowDecodedFrame(byte[] sample, uint width, uint height, int stride, VideoPixelFormatsEnum pixelFormat)
     {
         if (InvokeRequired)
         {
-            BeginInvoke(new Action(() => ShowFrame(jpeg)));
+            BeginInvoke(new Action(() => ShowDecodedFrame(sample, width, height, stride, pixelFormat)));
             return;
         }
 
-        using var stream = new MemoryStream(jpeg);
-        using var source = Image.FromStream(stream);
+        if (pixelFormat != VideoPixelFormatsEnum.Bgr && pixelFormat != VideoPixelFormatsEnum.Rgb)
+        {
+            return;
+        }
+
         _framesReceived++;
         if (_framesReceived == 1 || _framesReceived % 30 == 0)
         {
-            Console.WriteLine($"Received frame #{_framesReceived}: {source.Width}x{source.Height}, {jpeg.Length} bytes");
+            Console.WriteLine($"Received video frame #{_framesReceived}: {width}x{height}, {sample.Length} bytes");
         }
 
-        var next = new Bitmap(source.Width, source.Height);
-        using (var graphics = Graphics.FromImage(next))
+        var next = new Bitmap((int)width, (int)height, PixelFormat.Format24bppRgb);
+        var area = new Rectangle(0, 0, next.Width, next.Height);
+        var bitmapData = next.LockBits(area, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+
+        try
         {
-            graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            graphics.DrawImage(source, 0, 0, source.Width, source.Height);
+            var rowBytes = next.Width * 3;
+
+            for (var y = 0; y < next.Height; y++)
+            {
+                var destination = IntPtr.Add(bitmapData.Scan0, y * bitmapData.Stride);
+                Marshal.Copy(sample, y * stride, destination, rowBytes);
+            }
+        }
+        finally
+        {
+            next.UnlockBits(bitmapData);
         }
 
         var previous = _pictureBox.Image;

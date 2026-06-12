@@ -15,7 +15,6 @@ internal sealed record CommandLineOptions
     public string ListenUrl { get; init; } = "http://127.0.0.1:5080";
     public Uri ServerUri { get; init; } = new("ws://127.0.0.1:5080/signal");
     public int FramesPerSecond { get; init; } = 10;
-    public long JpegQuality { get; init; } = 70;
     public int ClientDurationSeconds { get; init; }
 
     public static CommandLineOptions Parse(string[] args)
@@ -36,8 +35,7 @@ internal sealed record CommandLineOptions
                 Mode = AppMode.Server,
                 WindowQuery = Get(values, "window", required: true),
                 ListenUrl = Get(values, "listen", "http://127.0.0.1:5080"),
-                FramesPerSecond = GetInt(values, "fps", 10, 1, 30),
-                JpegQuality = GetInt(values, "jpeg-quality", 70, 1, 100)
+                FramesPerSecond = GetInt(values, "fps", 10, 1, 30)
             },
             "client" => new CommandLineOptions
             {
@@ -56,7 +54,7 @@ internal sealed record CommandLineOptions
 
         Usage:
           DevKitRelay list-windows
-          DevKitRelay server --window <title-part> [--listen http://127.0.0.1:5080] [--fps 10] [--jpeg-quality 70]
+          DevKitRelay server --window <title-part> [--listen http://127.0.0.1:5080] [--fps 10]
           DevKitRelay client [--server ws://127.0.0.1:5080/signal] [--duration 0]
         """);
     }

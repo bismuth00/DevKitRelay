@@ -3,22 +3,49 @@ using System.Runtime.InteropServices;
 
 namespace DevKitRelay;
 
-internal sealed class WindowCapture(IntPtr windowHandle, long jpegQuality)
-{
-    private readonly ImageCodecInfo _jpegCodec = ImageCodecInfo.GetImageEncoders()
-        .First(codec => codec.FormatID == ImageFormat.Jpeg.Guid);
+internal sealed record CapturedVideoFrame(byte[] Bgr, int Width, int Height);
 
-    public byte[] CaptureJpeg()
+internal sealed class WindowCapture(IntPtr windowHandle)
+{
+    public CapturedVideoFrame CaptureBgrFrame()
+    {
+        using var bitmap = CaptureBitmap();
+        var area = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
+        var bitmapData = bitmap.LockBits(area, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+
+        try
+        {
+            var rowBytes = bitmap.Width * 3;
+            var sample = new byte[rowBytes * bitmap.Height];
+
+            for (var y = 0; y < bitmap.Height; y++)
+            {
+                var source = IntPtr.Add(bitmapData.Scan0, y * bitmapData.Stride);
+                Marshal.Copy(source, sample, y * rowBytes, rowBytes);
+            }
+
+            return new CapturedVideoFrame(sample, bitmap.Width, bitmap.Height);
+        }
+        finally
+        {
+            bitmap.UnlockBits(bitmapData);
+        }
+    }
+
+    private Bitmap CaptureBitmap()
     {
         if (!GetWindowRect(windowHandle, out var rect))
         {
             throw new InvalidOperationException("Failed to read window bounds.");
         }
 
-        var width = Math.Max(1, rect.Right - rect.Left);
-        var height = Math.Max(1, rect.Bottom - rect.Top);
+        var width = Math.Max(2, rect.Right - rect.Left);
+        var height = Math.Max(2, rect.Bottom - rect.Top);
 
-        using var bitmap = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+        width -= width % 2;
+        height -= height % 2;
+
+        var bitmap = new Bitmap(width, height, PixelFormat.Format24bppRgb);
         using var graphics = Graphics.FromImage(bitmap);
         var targetDc = graphics.GetHdc();
 
@@ -32,6 +59,11 @@ internal sealed class WindowCapture(IntPtr windowHandle, long jpegQuality)
                 screenGraphics.CopyFromScreen(rect.Left, rect.Top, 0, 0, new Size(width, height));
             }
         }
+        catch
+        {
+            bitmap.Dispose();
+            throw;
+        }
         finally
         {
             if (targetDc != IntPtr.Zero)
@@ -40,11 +72,7 @@ internal sealed class WindowCapture(IntPtr windowHandle, long jpegQuality)
             }
         }
 
-        using var stream = new MemoryStream();
-        using var parameters = new EncoderParameters(1);
-        parameters.Param[0] = new EncoderParameter(Encoder.Quality, jpegQuality);
-        bitmap.Save(stream, _jpegCodec, parameters);
-        return stream.ToArray();
+        return bitmap;
     }
 
     [DllImport("user32.dll")]

@@ -1,8 +1,8 @@
 # DevKitRelay
 
-C# / WebRTC で、指定した Windows ウィンドウの画面を配信し、別プロセスのクライアントで受信表示するサンプルです。
+C# / WebRTC で、指定した Windows ウィンドウの画面を動画ストリームとして配信し、別プロセスのクライアントで受信表示するサンプルです。
 
-この実装は WebRTC の DataChannel に JPEG フレームを流します。映像コーデックのネイティブ依存を避けるため、導入しやすい構成にしています。
+サーバーは指定ウィンドウを BGR raw frame としてキャプチャし、VP8 にエンコードして WebRTC の video track で送信します。クライアントは受信した VP8 video track をデコードして WinForms に表示します。
 
 ## 必要環境
 
@@ -28,7 +28,7 @@ dotnet run -- list-windows
 ウィンドウタイトルの一部を指定して配信します。
 
 ```powershell
-dotnet run -- server --window "メモ帳" --listen http://0.0.0.0:5080 --fps 10 --jpeg-quality 70
+dotnet run -- server --window "メモ帳" --listen http://0.0.0.0:5080 --fps 10
 ```
 
 同じ PC で試す場合:
@@ -52,5 +52,6 @@ dotnet run -- client --server ws://127.0.0.1:5080/signal --duration 10
 ## 注意
 
 - WebRTC の通信確立用に、サーバーは簡易 WebSocket signaling エンドポイント `/signal` を持ちます。
+- 映像コーデックは VP8 です。
 - NAT 越えや TURN は未設定です。まずは同一 LAN または同一 PC での利用を想定しています。
 - 保護されたウィンドウ、管理者権限の違うウィンドウ、GPU オーバーレイなどはキャプチャできない場合があります。

@@ -3,6 +3,8 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
 using SIPSorcery.Net;
+using SIPSorceryMedia.Abstractions;
+using SIPSorceryMedia.Encoders;
 using System.Net.WebSockets;
 
 namespace DevKitRelay;
@@ -43,12 +45,16 @@ internal static class RelayServer
         CancellationToken cancellationToken)
     {
         using var peerConnection = new RTCPeerConnection();
-        var dataChannel = await peerConnection.createDataChannel("frames", null);
+        using var videoEndPoint = new VideoEncoderEndPoint();
         using var sendLoopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var localIceQueue = new List<RTCIceCandidate>();
         var remoteIceQueue = new List<RTCIceCandidateInit>();
         var offerSent = false;
         var remoteDescriptionSet = false;
+
+        var videoTrack = new MediaStreamTrack(videoEndPoint.GetVideoSourceFormats(), MediaStreamStatusEnum.SendOnly);
+        peerConnection.addTrack(videoTrack);
+        videoEndPoint.OnVideoSourceEncodedSample += peerConnection.SendVideo;
 
         peerConnection.onicecandidate += async candidate =>
         {
@@ -67,16 +73,19 @@ internal static class RelayServer
             }
         };
 
-        dataChannel.onopen += () =>
+        peerConnection.onconnectionstatechange += async state =>
         {
-            Console.WriteLine("DataChannel open.");
-            _ = Task.Run(() => SendFramesAsync(dataChannel, windowHandle, options, sendLoopCts.Token), sendLoopCts.Token);
-        };
+            Console.WriteLine($"Peer connection state: {state}");
 
-        dataChannel.onclose += () =>
-        {
-            Console.WriteLine("DataChannel closed.");
-            CancelQuietly(sendLoopCts);
+            if (state == RTCPeerConnectionState.connected)
+            {
+                _ = Task.Run(() => SendVideoAsync(videoEndPoint, windowHandle, options, sendLoopCts.Token), sendLoopCts.Token);
+            }
+            else if (state is RTCPeerConnectionState.closed or RTCPeerConnectionState.failed or RTCPeerConnectionState.disconnected)
+            {
+                CancelQuietly(sendLoopCts);
+                await videoEndPoint.CloseVideo();
+            }
         };
 
         var offer = peerConnection.createOffer(null);
@@ -136,25 +145,31 @@ internal static class RelayServer
         CancelQuietly(sendLoopCts);
     }
 
-    private static async Task SendFramesAsync(
-        RTCDataChannel dataChannel,
+    private static async Task SendVideoAsync(
+        VideoEncoderEndPoint videoEndPoint,
         IntPtr windowHandle,
         CommandLineOptions options,
         CancellationToken cancellationToken)
     {
-        var capture = new WindowCapture(windowHandle, options.JpegQuality);
-        var delay = TimeSpan.FromMilliseconds(1000.0 / options.FramesPerSecond);
+        var capture = new WindowCapture(windowHandle);
+        var delayMilliseconds = Math.Max(1, (int)Math.Round(1000.0 / options.FramesPerSecond));
+        var delay = TimeSpan.FromMilliseconds(delayMilliseconds);
 
         while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
-                var jpeg = capture.CaptureJpeg();
-                dataChannel.send(jpeg);
+                var frame = capture.CaptureBgrFrame();
+                videoEndPoint.ExternalVideoSourceRawSample(
+                    (uint)delayMilliseconds,
+                    frame.Width,
+                    frame.Height,
+                    frame.Bgr,
+                    VideoPixelFormatsEnum.Bgr);
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"Frame capture failed: {ex.Message}");
+                Console.Error.WriteLine($"Video frame capture failed: {ex.Message}");
             }
 
             await Task.Delay(delay, cancellationToken);
