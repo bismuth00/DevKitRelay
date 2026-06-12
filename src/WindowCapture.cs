@@ -1,4 +1,5 @@
 using System.Drawing.Imaging;
+using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 
 namespace DevKitRelay;
@@ -7,9 +8,16 @@ internal sealed record CapturedVideoFrame(byte[] Bgr, int Width, int Height);
 
 internal sealed class WindowCapture(IntPtr windowHandle)
 {
-    public CapturedVideoFrame CaptureBgrFrame()
+    public CapturedVideoFrame CaptureBgrFrame(double scale)
     {
         using var bitmap = CaptureBitmap();
+        using var frameBitmap = scale < 0.999 ? ScaleBitmap(bitmap, scale) : null;
+        var source = frameBitmap ?? bitmap;
+        return CopyBgr(source);
+    }
+
+    private static CapturedVideoFrame CopyBgr(Bitmap bitmap)
+    {
         var area = new Rectangle(0, 0, bitmap.Width, bitmap.Height);
         var bitmapData = bitmap.LockBits(area, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
 
@@ -30,6 +38,23 @@ internal sealed class WindowCapture(IntPtr windowHandle)
         {
             bitmap.UnlockBits(bitmapData);
         }
+    }
+
+    private static Bitmap ScaleBitmap(Bitmap source, double scale)
+    {
+        var width = Math.Max(2, (int)Math.Round(source.Width * scale));
+        var height = Math.Max(2, (int)Math.Round(source.Height * scale));
+
+        width -= width % 2;
+        height -= height % 2;
+
+        var scaled = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+        using var graphics = Graphics.FromImage(scaled);
+        graphics.CompositingQuality = CompositingQuality.HighQuality;
+        graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        graphics.DrawImage(source, 0, 0, width, height);
+        return scaled;
     }
 
     private Bitmap CaptureBitmap()

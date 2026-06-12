@@ -32,7 +32,7 @@ public sealed class RelaySmokeTests
 
             await using var server = ProcessRunner.Start(
                 "dotnet",
-                Quote(appDll) + $" server --window \"{Path.GetFileName(notepadFile)}\" --listen http://127.0.0.1:{port} --fps 5",
+                Quote(appDll) + $" server --window \"{Path.GetFileName(notepadFile)}\" --listen http://127.0.0.1:{port} --fps 5 --bitrate-kbps 1000 --scale 0.75",
                 root);
 
             Assert.True(

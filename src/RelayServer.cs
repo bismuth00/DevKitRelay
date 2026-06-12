@@ -4,7 +4,6 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
-using SIPSorceryMedia.Encoders;
 using System.Net.WebSockets;
 
 namespace DevKitRelay;
@@ -45,7 +44,7 @@ internal static class RelayServer
         CancellationToken cancellationToken)
     {
         using var peerConnection = new RTCPeerConnection();
-        using var videoEndPoint = new VideoEncoderEndPoint();
+        using var videoEndPoint = new ConfigurableVideoEncoderEndPoint(options.VideoBitrateKbps);
         using var sendLoopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var localIceQueue = new List<RTCIceCandidate>();
         var remoteIceQueue = new List<RTCIceCandidateInit>();
@@ -146,7 +145,7 @@ internal static class RelayServer
     }
 
     private static async Task SendVideoAsync(
-        VideoEncoderEndPoint videoEndPoint,
+        ConfigurableVideoEncoderEndPoint videoEndPoint,
         IntPtr windowHandle,
         CommandLineOptions options,
         CancellationToken cancellationToken)
@@ -159,7 +158,7 @@ internal static class RelayServer
         {
             try
             {
-                var frame = capture.CaptureBgrFrame();
+                var frame = capture.CaptureBgrFrame(options.VideoScale);
                 videoEndPoint.ExternalVideoSourceRawSample(
                     (uint)delayMilliseconds,
                     frame.Width,

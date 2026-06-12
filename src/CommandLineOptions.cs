@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace DevKitRelay;
 
 internal enum AppMode
@@ -15,6 +17,8 @@ internal sealed record CommandLineOptions
     public string ListenUrl { get; init; } = "http://127.0.0.1:5080";
     public Uri ServerUri { get; init; } = new("ws://127.0.0.1:5080/signal");
     public int FramesPerSecond { get; init; } = 10;
+    public uint? VideoBitrateKbps { get; init; }
+    public double VideoScale { get; init; } = 1.0;
     public int ClientDurationSeconds { get; init; }
 
     public static CommandLineOptions Parse(string[] args)
@@ -35,7 +39,9 @@ internal sealed record CommandLineOptions
                 Mode = AppMode.Server,
                 WindowQuery = Get(values, "window", required: true),
                 ListenUrl = Get(values, "listen", "http://127.0.0.1:5080"),
-                FramesPerSecond = GetInt(values, "fps", 10, 1, 30)
+                FramesPerSecond = GetInt(values, "fps", 10, 1, 30),
+                VideoBitrateKbps = GetOptionalUInt(values, "bitrate-kbps", 1, 100000),
+                VideoScale = GetDouble(values, "scale", 1.0, 0.1, 1.0)
             },
             "client" => new CommandLineOptions
             {
@@ -54,7 +60,7 @@ internal sealed record CommandLineOptions
 
         Usage:
           DevKitRelay list-windows
-          DevKitRelay server --window <title-part> [--listen http://127.0.0.1:5080] [--fps 10]
+          DevKitRelay server --window <title-part> [--listen http://127.0.0.1:5080] [--fps 10] [--bitrate-kbps 2500] [--scale 1.0]
           DevKitRelay client [--server ws://127.0.0.1:5080/signal] [--duration 0]
         """);
     }
@@ -105,6 +111,40 @@ internal sealed record CommandLineOptions
         }
 
         if (!int.TryParse(value, out var parsed) || parsed < min || parsed > max)
+        {
+            throw new ArgumentException($"--{key} must be between {min} and {max}.");
+        }
+
+        return parsed;
+    }
+
+    private static uint? GetOptionalUInt(Dictionary<string, string> values, string key, uint min, uint max)
+    {
+        if (!values.TryGetValue(key, out var value))
+        {
+            return null;
+        }
+
+        if (!uint.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) ||
+            parsed < min ||
+            parsed > max)
+        {
+            throw new ArgumentException($"--{key} must be between {min} and {max}.");
+        }
+
+        return parsed;
+    }
+
+    private static double GetDouble(Dictionary<string, string> values, string key, double defaultValue, double min, double max)
+    {
+        if (!values.TryGetValue(key, out var value))
+        {
+            return defaultValue;
+        }
+
+        if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) ||
+            parsed < min ||
+            parsed > max)
         {
             throw new ArgumentException($"--{key} must be between {min} and {max}.");
         }
