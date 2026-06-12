@@ -17,6 +17,14 @@ dotnet restore
 dotnet build
 ```
 
+## テスト
+
+```powershell
+dotnet test DevKitRelay.sln
+```
+
+統合テストは Windows 上で `notepad.exe`、サーバー、クライアントを実プロセスとして起動し、WebRTC video track の受信、初回フレームのデコード、クライアントウィンドウの自動リサイズを確認します。
+
 ## ウィンドウ一覧
 
 ```powershell
