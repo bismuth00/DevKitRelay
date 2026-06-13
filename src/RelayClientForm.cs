@@ -2,13 +2,16 @@ using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using SIPSorceryMedia.Encoders;
 using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
 using System.Net.WebSockets;
+using System.Runtime.InteropServices;
+using System.Text.Json;
 
 namespace DevKitRelay;
 
 internal sealed class RelayClientForm : Form
 {
+    private static readonly JsonSerializerOptions GamepadJsonOptions = new(JsonSerializerDefaults.Web);
+
     private readonly Uri _serverUri;
     private readonly int _durationSeconds;
     private readonly PictureBox _pictureBox;
@@ -76,6 +79,7 @@ internal sealed class RelayClientForm : Form
 
             using var peerConnection = new RTCPeerConnection();
             using var videoEndPoint = new VideoEncoderEndPoint();
+            using var gamepadReader = new XInputGamepadReader();
             var localIceQueue = new List<RTCIceCandidate>();
             var remoteIceQueue = new List<RTCIceCandidateInit>();
             var answerSent = false;
@@ -102,6 +106,19 @@ internal sealed class RelayClientForm : Form
                 {
                     await WebSocketJson.SendAsync(webSocket, SignalingMessage.Ice(candidate), _closingCts.Token);
                 }
+            };
+
+            peerConnection.ondatachannel += dataChannel =>
+            {
+                if (!string.Equals(dataChannel.label, "input", StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
+                SetStatus("Input DataChannel created.");
+                _ = Task.Run(
+                    () => SendGamepadInputAsync(dataChannel, gamepadReader, _closingCts.Token),
+                    _closingCts.Token);
             };
 
             peerConnection.onconnectionstatechange += async state =>
@@ -179,6 +196,67 @@ internal sealed class RelayClientForm : Form
         {
             SetStatus(ex.Message);
             MessageBox.Show(this, ex.Message, "DevKitRelay", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private async Task SendGamepadInputAsync(
+        RTCDataChannel dataChannel,
+        IGamepadReader gamepadReader,
+        CancellationToken cancellationToken)
+    {
+        GamepadState? lastSent = null;
+        var nextHeartbeat = DateTimeOffset.MinValue;
+        ulong sequence = 1;
+        var disconnectedLogged = false;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var current = gamepadReader.Read() with
+            {
+                Sequence = sequence,
+                TimestampUnixMilliseconds = now.ToUnixTimeMilliseconds()
+            };
+
+            if (!current.IsConnected)
+            {
+                if (!disconnectedLogged)
+                {
+                    Console.WriteLine($"No {gamepadReader.ProviderName} gamepad connected.");
+                    disconnectedLogged = true;
+                }
+
+                if (lastSent?.IsConnected == false)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(16), cancellationToken);
+                    continue;
+                }
+            }
+            else
+            {
+                disconnectedLogged = false;
+            }
+
+            if (!current.HasSameInput(lastSent) || now >= nextHeartbeat)
+            {
+                var outbound = current with { Sequence = sequence++ };
+                try
+                {
+                    dataChannel.send(JsonSerializer.Serialize(outbound, GamepadJsonOptions));
+                    lastSent = outbound;
+                    nextHeartbeat = now.AddMilliseconds(500);
+                }
+                catch (InvalidOperationException)
+                {
+                    sequence--;
+                }
+                catch (ApplicationException)
+                {
+                    sequence--;
+                }
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(16), cancellationToken);
         }
     }
 

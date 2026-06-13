@@ -49,6 +49,14 @@ public sealed class RelaySmokeTests
                 FormatFailure("Client did not reach video receiving state.", client, server));
 
             Assert.True(
+                await client.WaitForOutputAsync("Input DataChannel created.", TimeSpan.FromSeconds(10)),
+                FormatFailure("Client did not receive the input data channel.", client, server));
+
+            Assert.True(
+                await server.WaitForOutputAsync("Input DataChannel open.", TimeSpan.FromSeconds(10)),
+                FormatFailure("Server did not open the input data channel.", server, client));
+
+            Assert.True(
                 await client.WaitForOutputAsync("Client window resized for video:", TimeSpan.FromSeconds(10)),
                 FormatFailure("Client did not resize to the received video frame.", client, server));
 

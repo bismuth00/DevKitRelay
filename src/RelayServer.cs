@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using System.Net.WebSockets;
+using System.Text;
 
 namespace DevKitRelay;
 
@@ -54,6 +55,13 @@ internal static class RelayServer
         var videoTrack = new MediaStreamTrack(videoEndPoint.GetVideoSourceFormats(), MediaStreamStatusEnum.SendOnly);
         peerConnection.addTrack(videoTrack);
         videoEndPoint.OnVideoSourceEncodedSample += peerConnection.SendVideo;
+
+        var inputChannel = await peerConnection.createDataChannel("input", null);
+        inputChannel.onopen += () => Console.WriteLine("Input DataChannel open.");
+        inputChannel.onmessage += (_, _, data) =>
+        {
+            Console.WriteLine($"Gamepad input: {Encoding.UTF8.GetString(data)}");
+        };
 
         peerConnection.onicecandidate += async candidate =>
         {
