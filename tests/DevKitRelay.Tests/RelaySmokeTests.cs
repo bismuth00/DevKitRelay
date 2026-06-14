@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using Xunit;
 
 namespace DevKitRelay.Tests;
@@ -6,7 +8,7 @@ namespace DevKitRelay.Tests;
 public sealed class RelaySmokeTests
 {
     [Fact]
-    public async Task Client_receives_video_stream_and_resizes_to_frame()
+    public async Task Client_receives_video_stream_and_resizes_to_source_window()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -57,12 +59,23 @@ public sealed class RelaySmokeTests
                 FormatFailure("Server did not open the input data channel.", server, client));
 
             Assert.True(
-                await client.WaitForOutputAsync("Client window resized for video:", TimeSpan.FromSeconds(10)),
-                FormatFailure("Client did not resize to the received video frame.", client, server));
+                await server.WaitForOutputAsync("Video metadata signaled: source=", TimeSpan.FromSeconds(10)),
+                FormatFailure("Server did not signal video metadata.", server, client));
+
+            Assert.True(
+                await client.WaitForOutputAsync("Client display area resized to source window:", TimeSpan.FromSeconds(10)),
+                FormatFailure("Client did not resize to the source window.", client, server));
 
             Assert.True(
                 await client.WaitForOutputAsync("Received video frame #1:", TimeSpan.FromSeconds(10)),
                 FormatFailure("Client did not decode a video frame.", client, server));
+
+            var capturedWindowHandle = GetStreamingWindowHandle(server);
+            Assert.True(ResizeWindow(capturedWindowHandle, 80, 80, 1100, 700), "Failed to resize notepad.");
+
+            Assert.True(
+                await server.WaitForOutputAsync("Video metadata sent: source=", TimeSpan.FromSeconds(10)),
+                FormatFailure("Server did not keep running after the captured window was resized.", server, client));
         }
         finally
         {
@@ -139,6 +152,20 @@ public sealed class RelaySmokeTests
 
     private static string Quote(string value) => '"' + value + '"';
 
+    private static IntPtr GetStreamingWindowHandle(ProcessRunner server)
+    {
+        var match = Regex.Match(server.StandardOutput, @"Streaming window: .+ \((\d+)\)");
+        if (!match.Success)
+        {
+            throw new InvalidOperationException("Could not find the captured window handle in server output.");
+        }
+
+        return new IntPtr(long.Parse(match.Groups[1].Value));
+    }
+
+    private static bool ResizeWindow(IntPtr handle, int x, int y, int width, int height) =>
+        MoveWindow(handle, x, y, width, height, true);
+
     private static string FormatFailure(string message, params ProcessRunner[] runners)
     {
         return message + Environment.NewLine + string.Join(
@@ -146,4 +173,14 @@ public sealed class RelaySmokeTests
             runners.Select(runner =>
                 $"--- stdout ---{Environment.NewLine}{runner.StandardOutput}{Environment.NewLine}--- stderr ---{Environment.NewLine}{runner.StandardError}"));
     }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool MoveWindow(
+        IntPtr handle,
+        int x,
+        int y,
+        int width,
+        int height,
+        [MarshalAs(UnmanagedType.Bool)] bool repaint);
 }

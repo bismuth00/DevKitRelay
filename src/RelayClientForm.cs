@@ -19,6 +19,7 @@ internal sealed class RelayClientForm : Form
     private readonly CancellationTokenSource _closingCts = new();
     private int _framesReceived;
     private volatile bool _sendGamepadInput;
+    private Size _sourceWindowSize = Size.Empty;
     private Size _videoSize = Size.Empty;
 
     public RelayClientForm(Uri serverUri, int durationSeconds)
@@ -113,15 +114,27 @@ internal sealed class RelayClientForm : Form
 
             peerConnection.ondatachannel += dataChannel =>
             {
-                if (!string.Equals(dataChannel.label, "input", StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(dataChannel.label, "input", StringComparison.OrdinalIgnoreCase))
                 {
+                    SetStatus("Input DataChannel created.");
+                    _ = Task.Run(
+                        () => SendGamepadInputAsync(dataChannel, gamepadReader, _closingCts.Token),
+                        _closingCts.Token);
                     return;
                 }
 
-                SetStatus("Input DataChannel created.");
-                _ = Task.Run(
-                    () => SendGamepadInputAsync(dataChannel, gamepadReader, _closingCts.Token),
-                    _closingCts.Token);
+                if (string.Equals(dataChannel.label, "video-metadata", StringComparison.OrdinalIgnoreCase))
+                {
+                    SetStatus("Video metadata DataChannel created.");
+                    dataChannel.onmessage += (_, _, data) =>
+                    {
+                        var metadata = JsonSerializer.Deserialize<VideoMetadata>(data, GamepadJsonOptions);
+                        if (metadata is not null)
+                        {
+                            ResizeToSourceWindow(metadata);
+                        }
+                    };
+                }
             };
 
             peerConnection.onconnectionstatechange += async state =>
@@ -147,6 +160,17 @@ internal sealed class RelayClientForm : Form
 
                 switch (message.Type)
                 {
+                    case "video-metadata":
+                        ResizeToSourceWindow(new VideoMetadata(
+                            message.SourceWidth,
+                            message.SourceHeight,
+                            message.FrameWidth,
+                            message.FrameHeight,
+                            message.DisplayWidth,
+                            message.DisplayHeight,
+                            message.Scale));
+                        break;
+
                     case "offer":
                         peerConnection.setRemoteDescription(new RTCSessionDescriptionInit
                         {
@@ -283,7 +307,7 @@ internal sealed class RelayClientForm : Form
         }
 
         _framesReceived++;
-        ResizeToVideo((int)width, (int)height);
+        SetVideoSize((int)width, (int)height);
         if (_framesReceived == 1 || _framesReceived % 30 == 0)
         {
             Console.WriteLine($"Received video frame #{_framesReceived}: {width}x{height}, {sample.Length} bytes");
@@ -296,11 +320,18 @@ internal sealed class RelayClientForm : Form
         try
         {
             var rowBytes = next.Width * 3;
+            var sourceStride = ResolveSourceStride(sample.Length, next.Width, next.Height, stride);
+
+            if (_framesReceived == 1 || _framesReceived % 30 == 0)
+            {
+                Console.WriteLine(
+                    $"Decoded frame layout: {width}x{height}, sample={sample.Length}, stride={stride}, sourceStride={sourceStride}, rowBytes={rowBytes}");
+            }
 
             for (var y = 0; y < next.Height; y++)
             {
                 var destination = IntPtr.Add(bitmapData.Scan0, y * bitmapData.Stride);
-                Marshal.Copy(sample, y * stride, destination, rowBytes);
+                Marshal.Copy(sample, y * sourceStride, destination, rowBytes);
             }
         }
         finally
@@ -313,7 +344,34 @@ internal sealed class RelayClientForm : Form
         previous?.Dispose();
     }
 
-    private void ResizeToVideo(int width, int height)
+    private static int ResolveSourceStride(int sampleLength, int width, int height, int decoderStride)
+    {
+        var rowBytes = width * 3;
+        var sourceStride = decoderStride;
+
+        if (sourceStride == width)
+        {
+            sourceStride *= 3;
+        }
+
+        if (sourceStride <= 0 ||
+            sourceStride < rowBytes ||
+            (long)sourceStride * (height - 1) + rowBytes > sampleLength)
+        {
+            var inferredStride = height > 0 ? sampleLength / height : 0;
+            sourceStride = inferredStride >= rowBytes ? inferredStride : rowBytes;
+        }
+
+        if ((long)sourceStride * (height - 1) + rowBytes > sampleLength)
+        {
+            throw new InvalidOperationException(
+                $"Decoded frame buffer is too small: sample={sampleLength}, width={width}, height={height}, stride={decoderStride}, sourceStride={sourceStride}.");
+        }
+
+        return sourceStride;
+    }
+
+    private void SetVideoSize(int width, int height)
     {
         var nextVideoSize = new Size(width, height);
         if (_videoSize == nextVideoSize)
@@ -322,8 +380,31 @@ internal sealed class RelayClientForm : Form
         }
 
         _videoSize = nextVideoSize;
-        ClientSize = new Size(width, height + _statusLabel.Height);
-        Console.WriteLine($"Client window resized for video: {width}x{height}");
+        if (_sourceWindowSize.IsEmpty)
+        {
+            ClientSize = new Size(width, height + _statusLabel.Height);
+            Console.WriteLine($"Client window resized for video: {width}x{height}");
+        }
+    }
+
+    private void ResizeToSourceWindow(VideoMetadata metadata)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(() => ResizeToSourceWindow(metadata)));
+            return;
+        }
+
+        var nextSourceWindowSize = new Size(metadata.DisplayWidth, metadata.DisplayHeight);
+        if (_sourceWindowSize == nextSourceWindowSize)
+        {
+            return;
+        }
+
+        _sourceWindowSize = nextSourceWindowSize;
+        ClientSize = new Size(metadata.DisplayWidth, metadata.DisplayHeight + _statusLabel.Height);
+        Console.WriteLine(
+            $"Client display area resized to source window: display={metadata.DisplayWidth}x{metadata.DisplayHeight}, source={metadata.SourceWidth}x{metadata.SourceHeight}, frame={metadata.FrameWidth}x{metadata.FrameHeight}, scale={metadata.Scale:0.###}");
     }
 
     private void SetStatus(string status)
