@@ -18,6 +18,7 @@ internal sealed class RelayClientForm : Form
     private readonly Label _statusLabel;
     private readonly CancellationTokenSource _closingCts = new();
     private int _framesReceived;
+    private volatile bool _sendGamepadInput;
     private Size _videoSize = Size.Empty;
 
     public RelayClientForm(Uri serverUri, int durationSeconds)
@@ -66,6 +67,8 @@ internal sealed class RelayClientForm : Form
 
             await ConnectAsync();
         };
+        Activated += (_, _) => _sendGamepadInput = true;
+        Deactivate += (_, _) => _sendGamepadInput = false;
         FormClosing += (_, _) => _closingCts.Cancel();
     }
 
@@ -211,6 +214,12 @@ internal sealed class RelayClientForm : Form
 
         while (!cancellationToken.IsCancellationRequested)
         {
+            if (!_sendGamepadInput)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(16), cancellationToken);
+                continue;
+            }
+
             var now = DateTimeOffset.UtcNow;
             var current = gamepadReader.Read() with
             {
