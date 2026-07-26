@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
+using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -48,8 +49,13 @@ internal static class RelayServer
         CancellationToken cancellationToken)
     {
         using var peerConnection = new RTCPeerConnection();
-        using var videoEndPoint = new ConfigurableVideoEncoderEndPoint(options.VideoBitrateKbps);
         using var capture = CreateWindowCapture(windowHandle);
+        var initialMetadata = capture.GetVideoMetadata(options.VideoScale);
+        var targetKbps = options.VideoBitrateKbps ?? ConfigurableVideoEncoderEndPoint.RecommendTargetKbps(
+            initialMetadata.FrameWidth,
+            initialMetadata.FrameHeight,
+            options.FramesPerSecond);
+        using var videoEndPoint = new ConfigurableVideoEncoderEndPoint(targetKbps, options.EncoderCpuUsed);
         using var sendLoopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var localIceQueue = new List<RTCIceCandidate>();
         var remoteIceQueue = new List<RTCIceCandidateInit>();
@@ -60,16 +66,40 @@ internal static class RelayServer
         peerConnection.addTrack(videoTrack);
         videoEndPoint.OnVideoSourceEncodedSample += peerConnection.SendVideo;
 
-        var initialMetadata = capture.GetVideoMetadata(options.VideoScale);
         await WebSocketJson.SendAsync(webSocket, SignalingMessage.VideoMetadata(initialMetadata), cancellationToken);
         Console.WriteLine(
             $"Video metadata signaled: source={initialMetadata.SourceWidth}x{initialMetadata.SourceHeight}, frame={initialMetadata.FrameWidth}x{initialMetadata.FrameHeight}, display={initialMetadata.DisplayWidth}x{initialMetadata.DisplayHeight}, scale={initialMetadata.Scale:0.###}");
+        Console.WriteLine(
+            $"Video encoder: VP8, {options.FramesPerSecond} fps, {targetKbps} kbps" +
+            $"{(options.VideoBitrateKbps is null ? " (derived from frame size and fps)" : " (from --bitrate-kbps)")}");
 
         var inputChannel = await peerConnection.createDataChannel("input", null);
         inputChannel.onopen += () => Console.WriteLine("Input DataChannel open.");
         inputChannel.onmessage += (_, _, data) =>
         {
             Console.WriteLine($"Gamepad input: {Encoding.UTF8.GetString(data)}");
+        };
+
+        var controlChannel = await peerConnection.createDataChannel("control", null);
+        controlChannel.onopen += () => Console.WriteLine("Control DataChannel open.");
+        controlChannel.onmessage += (_, _, data) =>
+        {
+            ControlMessage? message;
+            try
+            {
+                message = JsonSerializer.Deserialize<ControlMessage>(data, JsonOptions);
+            }
+            catch (JsonException ex)
+            {
+                Console.Error.WriteLine($"Ignoring malformed control message: {ex.Message}");
+                return;
+            }
+
+            if (message?.Type == ControlMessage.RequestKeyFrameType)
+            {
+                Console.WriteLine("Keyframe requested by client.");
+                videoEndPoint.RequestKeyFrame();
+            }
         };
 
         var videoMetadataChannelOpen = false;
@@ -185,16 +215,22 @@ internal static class RelayServer
         Func<bool> isVideoMetadataChannelOpen,
         CancellationToken cancellationToken)
     {
-        var delayMilliseconds = Math.Max(1, (int)Math.Round(1000.0 / options.FramesPerSecond));
-        var delay = TimeSpan.FromMilliseconds(delayMilliseconds);
+        var frameInterval = TimeSpan.FromSeconds(1.0 / options.FramesPerSecond);
+        var clock = Stopwatch.StartNew();
+        var nextFrameAt = frameInterval;
+        var statistics = new VideoSendStatistics();
+        TimeSpan? previousFrameStartedAt = null;
         VideoMetadata? lastSentMetadata = null;
         Size? encodedFrameSize = null;
 
         while (!cancellationToken.IsCancellationRequested)
         {
+            var frameStartedAt = clock.Elapsed;
+
             try
             {
                 var frame = capture.CaptureBgrFrame(options.VideoScale, encodedFrameSize);
+                var capturedAt = clock.Elapsed;
                 encodedFrameSize ??= new Size(frame.Width, frame.Height);
                 var metadata = WindowCapture.CreateMetadata(
                     frame.SourceWidth,
@@ -215,22 +251,46 @@ internal static class RelayServer
                 {
                     Console.Error.WriteLine(
                         $"Video frame skipped because encoder size changed unexpectedly: expected={encodedFrameSize.Value.Width}x{encodedFrameSize.Value.Height}, actual={frame.Width}x{frame.Height}");
-                    continue;
                 }
+                else
+                {
+                    // The RTP duration must reflect how far apart the frames really are, not the
+                    // nominal interval, otherwise the receiver's jitter buffer stutters.
+                    var elapsedMilliseconds = previousFrameStartedAt is { } previous
+                        ? (long)Math.Round((frameStartedAt - previous).TotalMilliseconds)
+                        : (long)Math.Round(frameInterval.TotalMilliseconds);
+                    previousFrameStartedAt = frameStartedAt;
 
-                videoEndPoint.ExternalVideoSourceRawSample(
-                    (uint)delayMilliseconds,
-                    frame.Width,
-                    frame.Height,
-                    frame.Bgr,
-                    VideoPixelFormatsEnum.Bgr);
+                    var encodedBytes = videoEndPoint.ExternalVideoSourceRawSample(
+                        elapsedMilliseconds,
+                        frame.Width,
+                        frame.Height,
+                        frame.Pixels,
+                        frame.PixelFormat);
+
+                    statistics.Record(
+                        capturedAt - frameStartedAt,
+                        clock.Elapsed - capturedAt,
+                        encodedBytes,
+                        videoEndPoint.LastQuantizer);
+                }
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"Video frame capture failed: {ex.Message}");
             }
 
-            await Task.Delay(delay, cancellationToken);
+            var now = clock.Elapsed;
+            statistics.ReportIfDue(now);
+
+            // Advance to the next deadline, dropping any we have already missed, so that a slow
+            // capture or encode does not accumulate drift on top of the requested frame rate.
+            while (nextFrameAt <= now)
+            {
+                nextFrameAt += frameInterval;
+            }
+
+            await Task.Delay(nextFrameAt - now, cancellationToken);
         }
     }
 

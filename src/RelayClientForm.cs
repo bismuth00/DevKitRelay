@@ -1,7 +1,7 @@
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using SIPSorceryMedia.Encoders;
-using System.Drawing.Imaging;
+using System.Drawing.Drawing2D;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -14,18 +14,21 @@ internal sealed class RelayClientForm : Form
 
     private readonly Uri _serverUri;
     private readonly int _durationSeconds;
-    private readonly PictureBox _pictureBox;
+    private readonly VideoDisplayMode _displayMode;
+    private readonly VideoDisplayPanel _videoPanel;
     private readonly Label _statusLabel;
     private readonly CancellationTokenSource _closingCts = new();
     private int _framesReceived;
     private volatile bool _sendGamepadInput;
     private Size _sourceWindowSize = Size.Empty;
     private Size _videoSize = Size.Empty;
+    private RTCDataChannel? _controlChannel;
 
-    public RelayClientForm(Uri serverUri, int durationSeconds)
+    public RelayClientForm(CommandLineOptions options)
     {
-        _serverUri = serverUri;
-        _durationSeconds = durationSeconds;
+        _serverUri = options.ServerUri;
+        _durationSeconds = options.ClientDurationSeconds;
+        _displayMode = options.DisplayMode;
         Text = "DevKitRelay Client";
         Width = 1280;
         Height = 800;
@@ -40,14 +43,15 @@ internal sealed class RelayClientForm : Form
             Padding = new Padding(8, 0, 0, 0)
         };
 
-        _pictureBox = new PictureBox
+        _videoPanel = new VideoDisplayPanel
         {
             Dock = DockStyle.Fill,
-            BackColor = Color.Black,
-            SizeMode = PictureBoxSizeMode.Zoom
+            ScalingMode = options.FilterMode == VideoFilterMode.Nearest
+                ? InterpolationMode.NearestNeighbor
+                : InterpolationMode.HighQualityBicubic
         };
 
-        Controls.Add(_pictureBox);
+        Controls.Add(_videoPanel);
         Controls.Add(_statusLabel);
 
         Load += async (_, _) =>
@@ -120,6 +124,14 @@ internal sealed class RelayClientForm : Form
                     _ = Task.Run(
                         () => SendGamepadInputAsync(dataChannel, gamepadReader, _closingCts.Token),
                         _closingCts.Token);
+                    return;
+                }
+
+                if (string.Equals(dataChannel.label, "control", StringComparison.OrdinalIgnoreCase))
+                {
+                    SetStatus("Control DataChannel created.");
+                    _controlChannel = dataChannel;
+                    _ = Task.Run(() => WatchForStalledVideoAsync(_closingCts.Token), _closingCts.Token);
                     return;
                 }
 
@@ -293,6 +305,53 @@ internal sealed class RelayClientForm : Form
         }
     }
 
+    /// <summary>
+    /// Asks the server for a keyframe whenever decoded frames stop arriving. A lost keyframe
+    /// otherwise leaves the picture broken until the encoder's next automatic one.
+    /// </summary>
+    private async Task WatchForStalledVideoAsync(CancellationToken cancellationToken)
+    {
+        var stallTimeout = TimeSpan.FromSeconds(2);
+        var lastSeenFrameCount = -1;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var frameCountAtStart = Volatile.Read(ref _framesReceived);
+
+            // The encoder already forces a keyframe on its first frame, so only intervene once the
+            // count has stopped moving between checks.
+            if (lastSeenFrameCount == frameCountAtStart)
+            {
+                TryRequestKeyFrame();
+            }
+
+            lastSeenFrameCount = frameCountAtStart;
+            await Task.Delay(stallTimeout, cancellationToken);
+        }
+    }
+
+    private void TryRequestKeyFrame()
+    {
+        if (_controlChannel is not { } channel)
+        {
+            return;
+        }
+
+        try
+        {
+            channel.send(JsonSerializer.Serialize(ControlMessage.RequestKeyFrame(), GamepadJsonOptions));
+            Console.WriteLine("Requested a keyframe from the server.");
+        }
+        catch (InvalidOperationException)
+        {
+            // The channel is not open yet; the next check will retry.
+        }
+        catch (ApplicationException)
+        {
+            // Same as above: transient data channel state.
+        }
+    }
+
     private void ShowDecodedFrame(byte[] sample, uint width, uint height, int stride, VideoPixelFormatsEnum pixelFormat)
     {
         if (InvokeRequired)
@@ -313,40 +372,53 @@ internal sealed class RelayClientForm : Form
             Console.WriteLine($"Received video frame #{_framesReceived}: {width}x{height}, {sample.Length} bytes");
         }
 
-        var next = new Bitmap((int)width, (int)height, PixelFormat.Format24bppRgb);
-        var area = new Rectangle(0, 0, next.Width, next.Height);
-        var bitmapData = next.LockBits(area, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+        var frameWidth = (int)width;
+        var frameHeight = (int)height;
+        var sourceStride = ResolveSourceStride(sample.Length, frameWidth, frameHeight, stride);
 
-        try
+        if (_framesReceived == 1 || _framesReceived % 30 == 0)
         {
-            var rowBytes = next.Width * 3;
-            var sourceStride = ResolveSourceStride(sample.Length, next.Width, next.Height, stride);
-
-            if (_framesReceived == 1 || _framesReceived % 30 == 0)
-            {
-                Console.WriteLine(
-                    $"Decoded frame layout: {width}x{height}, sample={sample.Length}, stride={stride}, sourceStride={sourceStride}, rowBytes={rowBytes}");
-            }
-
-            for (var y = 0; y < next.Height; y++)
-            {
-                var destination = IntPtr.Add(bitmapData.Scan0, y * bitmapData.Stride);
-                Marshal.Copy(sample, y * sourceStride, destination, rowBytes);
-            }
-        }
-        finally
-        {
-            next.UnlockBits(bitmapData);
+            Console.WriteLine(
+                $"Decoded frame layout: {width}x{height}, sample={sample.Length}, stride={stride}, sourceStride={sourceStride}, rowBytes={frameWidth * 3}");
         }
 
-        var previous = _pictureBox.Image;
-        _pictureBox.Image = next;
-        previous?.Dispose();
+        _videoPanel.UpdateFrame(sample, frameWidth, frameHeight, sourceStride);
     }
 
+    /// <summary>
+    /// Works out the real row pitch of a decoded frame.
+    /// </summary>
+    /// <remarks>
+    /// The decoder under-reports its stride: for a 1090 pixel wide frame it reports 3270 while it
+    /// actually pads each row to a four byte boundary and writes 3272. The reported value is
+    /// small enough to pass a bounds check, so trusting it shears the image by two bytes per row.
+    /// The buffer length is therefore treated as authoritative and the reported stride is only a
+    /// fallback.
+    /// </remarks>
     private static int ResolveSourceStride(int sampleLength, int width, int height, int decoderStride)
     {
         var rowBytes = width * 3;
+
+        if (height > 0)
+        {
+            // Almost every decoder aligns rows to four bytes; prefer that when it explains the
+            // buffer length exactly.
+            var alignedStride = (rowBytes + 3) & ~3;
+            if ((long)alignedStride * height == sampleLength)
+            {
+                return alignedStride;
+            }
+
+            if (sampleLength % height == 0)
+            {
+                var exactStride = sampleLength / height;
+                if (exactStride >= rowBytes)
+                {
+                    return exactStride;
+                }
+            }
+        }
+
         var sourceStride = decoderStride;
 
         if (sourceStride == width)
@@ -402,9 +474,16 @@ internal sealed class RelayClientForm : Form
         }
 
         _sourceWindowSize = nextSourceWindowSize;
-        ClientSize = new Size(metadata.DisplayWidth, metadata.DisplayHeight + _statusLabel.Height);
+
+        // In Frame mode the client area matches the encoded frame, so a downscaled stream is shown
+        // at its native size rather than being upscaled back to the source window's dimensions.
+        var displayArea = _displayMode == VideoDisplayMode.Frame
+            ? new Size(metadata.FrameWidth, metadata.FrameHeight)
+            : new Size(metadata.DisplayWidth, metadata.DisplayHeight);
+
+        ClientSize = new Size(displayArea.Width, displayArea.Height + _statusLabel.Height);
         Console.WriteLine(
-            $"Client display area resized to source window: display={metadata.DisplayWidth}x{metadata.DisplayHeight}, source={metadata.SourceWidth}x{metadata.SourceHeight}, frame={metadata.FrameWidth}x{metadata.FrameHeight}, scale={metadata.Scale:0.###}");
+            $"Client display area resized to source window: display={displayArea.Width}x{displayArea.Height}, source={metadata.SourceWidth}x{metadata.SourceHeight}, frame={metadata.FrameWidth}x{metadata.FrameHeight}, scale={metadata.Scale:0.###}, mode={_displayMode}");
     }
 
     private void SetStatus(string status)

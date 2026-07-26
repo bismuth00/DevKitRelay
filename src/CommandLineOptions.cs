@@ -10,16 +10,40 @@ internal enum AppMode
     Client
 }
 
+internal enum VideoDisplayMode
+{
+    /// <summary>Size the window to the original source window, upscaling a downscaled stream.</summary>
+    Source,
+
+    /// <summary>Size the window to the encoded frame, so the image is never upscaled.</summary>
+    Frame
+}
+
+internal enum VideoFilterMode
+{
+    Bicubic,
+    Nearest
+}
+
 internal sealed record CommandLineOptions
 {
     public AppMode Mode { get; init; } = AppMode.Help;
     public string WindowQuery { get; init; } = "";
     public string ListenUrl { get; init; } = "http://127.0.0.1:5080";
     public Uri ServerUri { get; init; } = new("ws://127.0.0.1:5080/signal");
-    public int FramesPerSecond { get; init; } = 10;
+    public int FramesPerSecond { get; init; } = 30;
     public uint? VideoBitrateKbps { get; init; }
     public double VideoScale { get; init; } = 1.0;
+
+    /// <summary>
+    /// libvpx VP8 cpu-used: negative favours quality, positive favours speed. Lower it if the
+    /// measured frame rate keeps up; raise it if encoding is the bottleneck.
+    /// </summary>
+    public int EncoderCpuUsed { get; init; } = -6;
+
     public int ClientDurationSeconds { get; init; }
+    public VideoDisplayMode DisplayMode { get; init; } = VideoDisplayMode.Source;
+    public VideoFilterMode FilterMode { get; init; } = VideoFilterMode.Bicubic;
 
     public static CommandLineOptions Parse(string[] args)
     {
@@ -39,15 +63,18 @@ internal sealed record CommandLineOptions
                 Mode = AppMode.Server,
                 WindowQuery = Get(values, "window", required: true),
                 ListenUrl = Get(values, "listen", "http://127.0.0.1:5080"),
-                FramesPerSecond = GetInt(values, "fps", 10, 1, 30),
+                FramesPerSecond = GetInt(values, "fps", 30, 1, 60),
                 VideoBitrateKbps = GetOptionalUInt(values, "bitrate-kbps", 1, 100000),
-                VideoScale = GetDouble(values, "scale", 1.0, 0.1, 1.0)
+                VideoScale = GetDouble(values, "scale", 1.0, 0.1, 1.0),
+                EncoderCpuUsed = GetInt(values, "cpu-used", -6, -16, 16)
             },
             "client" => new CommandLineOptions
             {
                 Mode = AppMode.Client,
                 ServerUri = new Uri(Get(values, "server", "ws://127.0.0.1:5080/signal")),
-                ClientDurationSeconds = GetInt(values, "duration", 0, 0, 86400)
+                ClientDurationSeconds = GetInt(values, "duration", 0, 0, 86400),
+                DisplayMode = GetEnum(values, "display", VideoDisplayMode.Source),
+                FilterMode = GetEnum(values, "filter", VideoFilterMode.Bicubic)
             },
             _ => throw new ArgumentException($"Unknown mode: {args[0]}")
         };
@@ -60,8 +87,8 @@ internal sealed record CommandLineOptions
 
         Usage:
           DevKitRelay list-windows
-          DevKitRelay server --window <title-part> [--listen http://127.0.0.1:5080] [--fps 10] [--bitrate-kbps 2500] [--scale 1.0]
-          DevKitRelay client [--server ws://127.0.0.1:5080/signal] [--duration 0]
+          DevKitRelay server --window <title-part> [--listen http://127.0.0.1:5080] [--fps 30] [--bitrate-kbps 2500] [--scale 1.0] [--cpu-used -6]
+          DevKitRelay client [--server ws://127.0.0.1:5080/signal] [--duration 0] [--display source|frame] [--filter bicubic|nearest]
         """);
     }
 
@@ -147,6 +174,23 @@ internal sealed record CommandLineOptions
             parsed > max)
         {
             throw new ArgumentException($"--{key} must be between {min} and {max}.");
+        }
+
+        return parsed;
+    }
+
+    private static TEnum GetEnum<TEnum>(Dictionary<string, string> values, string key, TEnum defaultValue)
+        where TEnum : struct, Enum
+    {
+        if (!values.TryGetValue(key, out var value))
+        {
+            return defaultValue;
+        }
+
+        if (!Enum.TryParse<TEnum>(value, ignoreCase: true, out var parsed) || !Enum.IsDefined(parsed))
+        {
+            throw new ArgumentException(
+                $"--{key} must be one of: {string.Join(", ", Enum.GetNames<TEnum>()).ToLowerInvariant()}.");
         }
 
         return parsed;

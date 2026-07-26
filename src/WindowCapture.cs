@@ -1,3 +1,4 @@
+using SIPSorceryMedia.Abstractions;
 using System.Drawing.Imaging;
 using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
@@ -5,7 +6,8 @@ using System.Runtime.InteropServices;
 namespace DevKitRelay;
 
 internal sealed record CapturedVideoFrame(
-    byte[] Bgr,
+    byte[] Pixels,
+    VideoPixelFormatsEnum PixelFormat,
     int Width,
     int Height,
     int SourceWidth,
@@ -51,7 +53,13 @@ internal sealed class WindowCapture(IntPtr windowHandle) : IWindowCapture
                 Marshal.Copy(source, sample, y * rowBytes, rowBytes);
             }
 
-            return new CapturedVideoFrame(sample, bitmap.Width, bitmap.Height, sourceWidth, sourceHeight);
+            return new CapturedVideoFrame(
+                sample,
+                VideoPixelFormatsEnum.Bgr,
+                bitmap.Width,
+                bitmap.Height,
+                sourceWidth,
+                sourceHeight);
         }
         finally
         {
@@ -76,15 +84,7 @@ internal sealed class WindowCapture(IntPtr windowHandle) : IWindowCapture
         return scaled;
     }
 
-    private static Size ScaleSize(Size sourceSize, double scale)
-    {
-        var width = Math.Max(2, (int)Math.Round(sourceSize.Width * scale));
-        var height = Math.Max(2, (int)Math.Round(sourceSize.Height * scale));
-
-        width -= width % 2;
-        height -= height % 2;
-        return new Size(width, height);
-    }
+    private static Size ScaleSize(Size sourceSize, double scale) => FrameGeometry.ScaleSize(sourceSize, scale);
 
     public static VideoMetadata CreateMetadata(
         int sourceWidth,
@@ -112,12 +112,7 @@ internal sealed class WindowCapture(IntPtr windowHandle) : IWindowCapture
     private Size GetSourceSize()
     {
         var rect = GetWindowRectBounds();
-        var width = Math.Max(2, rect.Right - rect.Left);
-        var height = Math.Max(2, rect.Bottom - rect.Top);
-
-        width -= width % 2;
-        height -= height % 2;
-        return new Size(width, height);
+        return FrameGeometry.ToEncodableSize(new Size(rect.Right - rect.Left, rect.Bottom - rect.Top));
     }
 
     private Bitmap CaptureBitmap()

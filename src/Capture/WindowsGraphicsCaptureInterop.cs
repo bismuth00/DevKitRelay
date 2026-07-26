@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using Windows.Graphics.Capture;
 using Windows.Graphics.DirectX.Direct3D11;
+using WinRT;
 
 namespace DevKitRelay;
 
@@ -23,7 +24,11 @@ internal static class WindowsGraphicsCaptureInterop
             var interop = Marshal.GetObjectForIUnknown(factory) as IGraphicsCaptureItemInterop
                 ?? throw new InvalidOperationException("GraphicsCaptureItem interop factory is not available.");
             ThrowIfFailed(interop.CreateForWindow(windowHandle, GraphicsCaptureItemGuid, out item));
-            return (GraphicsCaptureItem)Marshal.GetObjectForIUnknown(item);
+
+            // WinRT types are projected by CsWinRT, not by the built-in COM interop, so
+            // Marshal.GetObjectForIUnknown hands back a __ComObject that cannot be cast to
+            // GraphicsCaptureItem. FromAbi adds its own reference, so the caller still releases.
+            return MarshalInspectable<GraphicsCaptureItem>.FromAbi(item);
         }
         finally
         {
@@ -49,7 +54,7 @@ internal static class WindowsGraphicsCaptureInterop
         ThrowIfFailed(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice, out var inspectable));
         try
         {
-            return (IDirect3DDevice)Marshal.GetObjectForIUnknown(inspectable);
+            return MarshalInspectable<IDirect3DDevice>.FromAbi(inspectable);
         }
         finally
         {
