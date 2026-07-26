@@ -27,7 +27,7 @@ internal static class Program
                     break;
 
                 case AppMode.Client:
-                    Application.Run(new RelayClientForm(options.ServerUri, options.ClientDurationSeconds));
+                    Application.Run(new RelayClientForm(options));
                     break;
 
                 default:
